@@ -103,6 +103,45 @@ def post_json(
         )
 
 
+def get_json(
+    url: str,
+    *,
+    bearer: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> Response:
+    """GET a URL expecting JSON back. Same Response + Classification shape
+    as post_json so callers can use the same retry/halt logic if needed."""
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("User-Agent", user_agent())
+    req.add_header("X-Trace-Id", trace_id())
+    if bearer:
+        req.add_header("Authorization", f"Bearer {bearer}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read()
+            status = resp.status
+            return Response(status=status, body=data, classification=classify(status, False))
+    except urllib.error.HTTPError as e:
+        try:
+            data = e.read()
+        except Exception:
+            data = b""
+        return Response(
+            status=e.code,
+            body=data,
+            classification=classify(e.code, False),
+            error=str(e),
+        )
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        return Response(
+            status=0,
+            body=b"",
+            classification=Classification.RETRY,
+            error=str(e),
+        )
+
+
 def parse_json(resp: Response) -> dict:
     if not resp.body:
         return {}

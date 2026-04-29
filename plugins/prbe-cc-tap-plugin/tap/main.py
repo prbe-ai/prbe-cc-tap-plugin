@@ -35,6 +35,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from tap import config as cfg
+from tap import killswitch
 from tap import outbox
 from tap.outbox import HaltError
 from tap.storage import FileOffset, Storage
@@ -210,6 +211,7 @@ def _run_loop(c: cfg.WatchConfig, storage: Storage) -> int:
     tick_count = 0
     empty_ticks = 0
     in_idle_mode = False
+    in_killswitch_mode = False
 
     # Track whether we ever saw a process holding the transcript fd. Without
     # this gate, an early lsof miss (e.g. before CC has fully opened the file)
@@ -219,6 +221,28 @@ def _run_loop(c: cfg.WatchConfig, storage: Storage) -> int:
 
     while not _shutdown_observed(c):
         tick_count += 1
+
+        # Global ingestion killswitch (fetched + cached for 5min). When the
+        # operator has flipped it off (maintenance, runaway customer, panic
+        # stop) we skip the entire tick — no tail, no enqueue, no drain.
+        # byte_offset stays put so the next enabled tick catches up
+        # automatically. On poll error we fail OPEN inside is_ingestion_enabled
+        # itself; here we just consume the (enabled, reason) tuple.
+        ks_enabled, ks_reason = killswitch.is_ingestion_enabled(
+            token=c.token, base_url=base_url
+        )
+        if not ks_enabled:
+            if not in_killswitch_mode:
+                log.info(
+                    "ingestion paused via global killswitch (reason=%s)",
+                    ks_reason or "no reason given",
+                )
+                in_killswitch_mode = True
+            time.sleep(c.idle_interval_s)
+            continue
+        elif in_killswitch_mode:
+            log.info("ingestion resumed; global killswitch released")
+            in_killswitch_mode = False
 
         try:
             read = _tick_read(c, storage)
