@@ -10,10 +10,11 @@ Today it has one plugin: [`prbe-cc-tap-plugin`](./plugins/prbe-cc-tap-plugin/).
 /plugin install prbe-cc-tap-plugin@prbe-ai
 ```
 
-Then pair the device with your Probe workspace from a terminal:
+Then pair the device with your Probe workspace from a terminal. The `*/`
+glob resolves to whichever version Claude Code installed:
 
 ```bash
-cd ~/.claude/plugins/cache/prbe-ai/prbe-cc-tap-plugin/0.1.0 && \
+cd ~/.claude/plugins/cache/prbe-ai/prbe-cc-tap-plugin/*/ && \
   python3 -m tap pair <pairing-token>
 ```
 
