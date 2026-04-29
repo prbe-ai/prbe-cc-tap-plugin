@@ -10,6 +10,13 @@ Exits cleanly on:
   - killswitch ~/.claude/plugins/prbe-cc-tap-plugin/.disabled
   - cwd matching .disabled_paths
   - 401 halt from the server
+  - transcript file missing for 5 ticks (file deleted / session torn down)
+  - plugin updated on disk (mtime of tap/__init__.py advanced) — wrapper
+    respawns into the new code automatically
+  - orphan session detected (no process holds the transcript open) —
+    happens when CC is hard-killed (SIGKILL / OS reboot / force-quit) and
+    SessionEnd never fires; touches the shutdown sentinel so the wrapper
+    exits too instead of respawning a doomed daemon
 """
 
 from __future__ import annotations
@@ -17,11 +24,13 @@ from __future__ import annotations
 import argparse
 import logging
 import signal
+import subprocess
 import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
 
+import tap
 from tap import config as cfg
 from tap import outbox
 from tap.outbox import HaltError
@@ -32,6 +41,15 @@ log = logging.getLogger("prbe-cc-tap")
 
 # Drain budget per tick — keep ticking responsive even if many batches are due.
 MAX_DRAIN_PER_TICK = 64
+
+# Run the orphan-session check (lsof on transcript) every N ticks. At the
+# default 5min sync_interval, 12 ticks ≈ 1 hour. lsof is a subprocess and
+# we don't need fast detection — orphans only matter for tidy cleanup.
+ORPHAN_CHECK_EVERY_TICKS = 12
+
+# Hard cap on how long we'll wait for lsof to return; if it hangs, we'd
+# rather assume "alive" and skip than block the tick.
+ORPHAN_LSOF_TIMEOUT_S = 5
 
 _shutdown_requested = False
 
@@ -51,6 +69,50 @@ def _shutdown_observed(c: cfg.WatchConfig) -> bool:
         or c.shutdown_sentinel.exists()
         or cfg.killswitch_active()
     )
+
+
+def _plugin_init_path() -> Path | None:
+    """Path to tap/__init__.py — used as a single mtime probe for the whole
+    package. `git reset --hard` (or a re-run of install.sh) bumps every file's
+    mtime in lockstep, so checking one file is sufficient to detect updates."""
+    f = getattr(tap, "__file__", None)
+    return Path(f) if f else None
+
+
+def _stat_mtime(path: Path | None) -> float | None:
+    """Return file mtime, or None if anything goes wrong. We never want
+    mtime-stat failures to crash the daemon."""
+    if path is None:
+        return None
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _transcript_has_active_reader(path: Path) -> bool | None:
+    """True/False if lsof can determine; None if lsof is unavailable.
+
+    `lsof -t -- <path>` lists PIDs that hold an open fd on `path`. The daemon
+    itself opens the transcript only briefly inside _tick_read, so when this
+    function runs (after the tick's read+enqueue completed) the daemon's own
+    fd is closed and won't show up. CC keeps the transcript fd open for the
+    session's lifetime, so an empty result means CC is dead.
+
+    Returning None (lsof not installed, weird container, timeout) is treated
+    by the caller as "can't tell, assume alive" — we never orphan-exit on
+    ambiguous signal.
+    """
+    try:
+        result = subprocess.run(
+            ["lsof", "-t", "--", str(path)],
+            capture_output=True,
+            timeout=ORPHAN_LSOF_TIMEOUT_S,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    return bool(result.stdout.strip())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -118,8 +180,35 @@ def _run_loop(c: cfg.WatchConfig, storage: Storage) -> int:
     batch_seq = max(0, storage.max_batch_seq(c.session_id) + 1)
 
     missing_ticks = 0
+    tick_count = 0
+
+    # Snapshot the package's mtime at startup. If it moves forward we exit
+    # cleanly so the wrapper respawns into the new code. mtime-only check
+    # is enough because git reset --hard / install.sh rewrite all files
+    # together — there's no partial-update window where some files are new
+    # and __init__.py is old.
+    plugin_path = _plugin_init_path()
+    plugin_mtime_at_start = _stat_mtime(plugin_path)
+
+    # Track whether we ever saw a process holding the transcript fd. Without
+    # this gate, an early lsof miss (e.g. before CC has fully opened the file)
+    # would orphan-exit a healthy daemon. We only treat "no reader" as orphan
+    # if we previously observed a reader.
+    seen_active_reader = False
 
     while not _shutdown_observed(c):
+        tick_count += 1
+
+        # Plugin-update detection — cheap, runs every tick.
+        if plugin_mtime_at_start is not None:
+            current_mtime = _stat_mtime(plugin_path)
+            if current_mtime is not None and current_mtime > plugin_mtime_at_start:
+                log.info(
+                    "plugin updated on disk (%s mtime %.0f → %.0f); exiting for clean restart",
+                    plugin_path, plugin_mtime_at_start, current_mtime,
+                )
+                return 0
+
         try:
             read = _tick_read(c, storage)
         except FileNotFoundError:
@@ -177,6 +266,27 @@ def _run_loop(c: cfg.WatchConfig, storage: Storage) -> int:
             return 1
         except Exception:
             log.exception("drain raised; will retry next tick")
+
+        # Orphan-session detection. CC keeps the transcript fd open for the
+        # session's lifetime; if no process holds it, the session is gone.
+        # Only trips after we've previously observed a reader, so a startup
+        # race or a system without lsof can't false-positive us into exit.
+        if tick_count % ORPHAN_CHECK_EVERY_TICKS == 0:
+            has_reader = _transcript_has_active_reader(c.transcript_path)
+            if has_reader is True:
+                seen_active_reader = True
+            elif has_reader is False and seen_active_reader:
+                log.info(
+                    "no process holds %s open; CC session ended without SessionEnd, exiting",
+                    c.transcript_path,
+                )
+                # Touch the sentinel so the wrapper exits instead of respawning
+                # us into the same dead-session state.
+                try:
+                    c.shutdown_sentinel.touch()
+                except OSError:
+                    pass
+                return 0
 
         # Sleep in 1s slices so SIGTERM/sentinel/killswitch are responsive.
         slept = 0
