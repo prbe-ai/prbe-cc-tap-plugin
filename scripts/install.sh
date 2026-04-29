@@ -2,17 +2,14 @@
 # Probe Claude Code tap plugin installer.
 #
 # Usage:
-#   curl -fsSL https://api.prbe.ai/install/cc-tap-plugin | sh
+#   curl -fsSL https://api.prbe.ai/install/cc-tap-plugin | sh                         # install only
+#   curl -fsSL https://api.prbe.ai/install/cc-tap-plugin | sh -s -- <pairing-token>   # install + pair
 #
-# Installs (or updates in place) the plugin under
-# ~/.claude/plugins/prbe-cc-tap-plugin/. Pairing is a separate step:
-#
-#   cd ~/.claude/plugins/prbe-cc-tap-plugin && python3 -m tap pair <token>
-#
-# Idempotent — safe to re-run to update the plugin.
+# Idempotent — safe to re-run to update the plugin or re-pair.
 
 set -euo pipefail
 
+PAIRING_TOKEN="${1:-}"
 PLUGIN_DIR="${PRBE_CC_TAP_PLUGIN_DIR:-$HOME/.claude/plugins/prbe-cc-tap-plugin}"
 REPO_URL="${PRBE_CC_TAP_REPO_URL:-https://github.com/prbe-ai/prbe-cc-tap-plugin.git}"
 
@@ -39,7 +36,20 @@ else
     git clone --quiet "$REPO_URL" "$PLUGIN_DIR"
 fi
 
-cat <<EOF
+if [ -n "$PAIRING_TOKEN" ]; then
+    printf 'pairing\n'
+    ( cd "$PLUGIN_DIR" && PYTHONPATH="$PLUGIN_DIR" python3 -m tap pair "$PAIRING_TOKEN" )
+    cat <<EOF
+
+Installed and paired.
+  plugin:  $PLUGIN_DIR
+  status:  cd $PLUGIN_DIR && python3 -m tap status
+
+Open a new Claude Code session in any project — the daemon will start
+automatically via the SessionStart hook and ship transcripts to Probe.
+EOF
+else
+    cat <<EOF
 
 Installed.
   plugin:  $PLUGIN_DIR
@@ -48,7 +58,5 @@ Next: pair this device with your Probe workspace. Get a token from
 https://dashboard.prbe.ai → Integrations → Claude Code, then run:
 
   cd $PLUGIN_DIR && python3 -m tap pair <token>
-
-After pairing, open a new Claude Code session — the daemon starts
-automatically via the SessionStart hook and ships transcripts to Probe.
 EOF
+fi
