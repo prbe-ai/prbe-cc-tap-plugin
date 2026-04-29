@@ -1,7 +1,9 @@
 """CLI dispatch: `python -m tap <subcommand>`.
 
-Subcommands mirror prbe-agent-tap (minus install/heartbeat/backfill — those
-are obsolete in plugin form, since lifecycle is owned by Claude Code).
+Install + registration are owned by Claude Code's plugin system — users
+add the marketplace via `/plugin marketplace add prbe-ai/prbe-cc-tap-plugin`
+and install via `/plugin install prbe-cc-tap-plugin@prbe-ai`. This CLI only
+covers the plugin's runtime behavior (the daemon and the device pairing).
 """
 
 from __future__ import annotations
@@ -13,12 +15,10 @@ def _print_help() -> int:
     print("Usage: python -m tap <subcommand> [args]")
     print()
     print("Subcommands:")
-    print("  watch       spawn the daemon (used by SessionStart hook)")
-    print("  pair        exchange pairing token for a bearer")
-    print("  status      print local state")
-    print("  revoke      revoke device + wipe local state")
-    print("  register    register the plugin with Claude Code's plugin system")
-    print("  unregister  remove the plugin from Claude Code's plugin system")
+    print("  watch    spawn the daemon (used by SessionStart hook)")
+    print("  pair     exchange pairing token for a bearer")
+    print("  status   print local state")
+    print("  revoke   revoke device + wipe local state")
     return 0
 
 
@@ -45,12 +45,6 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "revoke":
         from tap.revoke import main as revoke_main
         return revoke_main(rest)
-    if cmd == "register":
-        from tap.register import register
-        return register()
-    if cmd == "unregister":
-        from tap.register import unregister
-        return unregister()
 
     print(f"unknown subcommand {cmd!r}; try `python -m tap help`", file=sys.stderr)
     return 2
