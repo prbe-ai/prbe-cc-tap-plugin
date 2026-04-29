@@ -36,27 +36,38 @@ else
     git clone --quiet "$REPO_URL" "$PLUGIN_DIR"
 fi
 
+# Register with Claude Code's plugin system (idempotent — re-running just
+# refreshes the commit SHA + lastUpdated). Without this, CC clones the
+# code but never loads the SessionStart/SessionEnd hooks.
+printf 'registering with Claude Code\n'
+( cd "$PLUGIN_DIR" && PYTHONPATH="$PLUGIN_DIR" python3 -m tap register )
+
 if [ -n "$PAIRING_TOKEN" ]; then
     printf 'pairing\n'
     ( cd "$PLUGIN_DIR" && PYTHONPATH="$PLUGIN_DIR" python3 -m tap pair "$PAIRING_TOKEN" )
     cat <<EOF
 
-Installed and paired.
+Installed, registered, and paired.
   plugin:  $PLUGIN_DIR
   status:  cd $PLUGIN_DIR && python3 -m tap status
 
-Open a new Claude Code session in any project — the daemon will start
-automatically via the SessionStart hook and ship transcripts to Probe.
+Open a NEW Claude Code session — the daemon starts automatically via
+the SessionStart hook and ships transcripts to Probe. Existing CC
+sessions need to be restarted to pick up the plugin.
 EOF
 else
     cat <<EOF
 
-Installed.
+Installed and registered.
   plugin:  $PLUGIN_DIR
 
 Next: pair this device with your Probe workspace. Get a token from
 https://dashboard.prbe.ai → Integrations → Claude Code, then run:
 
   cd $PLUGIN_DIR && python3 -m tap pair <token>
+
+After pairing, open a NEW Claude Code session — the daemon starts
+automatically via the SessionStart hook. Existing CC sessions need
+to be restarted to pick up the plugin.
 EOF
 fi

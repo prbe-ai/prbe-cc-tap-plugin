@@ -112,11 +112,22 @@ touch ~/.claude/plugins/prbe-cc-tap-plugin/.no-auto-update
 ## Subcommands
 
 ```bash
-python -m tap watch    # daemon (called by SessionStart)
-python -m tap pair     # exchange pairing token for bearer
-python -m tap status   # print local state
-python -m tap revoke   # revoke device server-side + wipe local state
+python -m tap watch       # daemon (called by SessionStart)
+python -m tap pair        # exchange pairing token for bearer
+python -m tap status      # print local state
+python -m tap revoke      # revoke device server-side + wipe local state
+python -m tap register    # register plugin in Claude Code (called by install.sh)
+python -m tap unregister  # remove plugin from Claude Code's plugin system
 ```
+
+The `register` subcommand updates `~/.claude/plugins/installed_plugins.json`
+and `~/.claude/settings.json` so Claude Code actually loads the plugin's
+hooks. install.sh calls it automatically — re-running install.sh re-runs
+register, which is idempotent (preserves all other plugins, just refreshes
+the commit SHA + lastUpdated for ours).
+
+After registering, **restart Claude Code** for the hooks to fire — running
+sessions don't pick up newly-enabled plugins.
 
 ## File layout
 
