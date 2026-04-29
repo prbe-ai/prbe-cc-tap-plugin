@@ -11,8 +11,6 @@ Exits cleanly on:
   - cwd matching .disabled_paths
   - 401 halt from the server
   - transcript file missing for 5 ticks (file deleted / session torn down)
-  - plugin updated on disk (mtime of tap/__init__.py advanced) — wrapper
-    respawns into the new code automatically
   - orphan session detected (no process holds the transcript open) —
     happens when CC is hard-killed (SIGKILL / OS reboot / force-quit) and
     SessionEnd never fires; touches the shutdown sentinel so the wrapper
@@ -30,7 +28,6 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-import tap
 from tap import config as cfg
 from tap import outbox
 from tap.outbox import HaltError
@@ -69,25 +66,6 @@ def _shutdown_observed(c: cfg.WatchConfig) -> bool:
         or c.shutdown_sentinel.exists()
         or cfg.killswitch_active()
     )
-
-
-def _plugin_init_path() -> Path | None:
-    """Path to tap/__init__.py — used as a single mtime probe for the whole
-    package. `git reset --hard` (or a re-run of install.sh) bumps every file's
-    mtime in lockstep, so checking one file is sufficient to detect updates."""
-    f = getattr(tap, "__file__", None)
-    return Path(f) if f else None
-
-
-def _stat_mtime(path: Path | None) -> float | None:
-    """Return file mtime, or None if anything goes wrong. We never want
-    mtime-stat failures to crash the daemon."""
-    if path is None:
-        return None
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return None
 
 
 def _transcript_has_active_reader(path: Path) -> bool | None:
@@ -182,14 +160,6 @@ def _run_loop(c: cfg.WatchConfig, storage: Storage) -> int:
     missing_ticks = 0
     tick_count = 0
 
-    # Snapshot the package's mtime at startup. If it moves forward we exit
-    # cleanly so the wrapper respawns into the new code. mtime-only check
-    # is enough because git reset --hard / install.sh rewrite all files
-    # together — there's no partial-update window where some files are new
-    # and __init__.py is old.
-    plugin_path = _plugin_init_path()
-    plugin_mtime_at_start = _stat_mtime(plugin_path)
-
     # Track whether we ever saw a process holding the transcript fd. Without
     # this gate, an early lsof miss (e.g. before CC has fully opened the file)
     # would orphan-exit a healthy daemon. We only treat "no reader" as orphan
@@ -198,16 +168,6 @@ def _run_loop(c: cfg.WatchConfig, storage: Storage) -> int:
 
     while not _shutdown_observed(c):
         tick_count += 1
-
-        # Plugin-update detection — cheap, runs every tick.
-        if plugin_mtime_at_start is not None:
-            current_mtime = _stat_mtime(plugin_path)
-            if current_mtime is not None and current_mtime > plugin_mtime_at_start:
-                log.info(
-                    "plugin updated on disk (%s mtime %.0f → %.0f); exiting for clean restart",
-                    plugin_path, plugin_mtime_at_start, current_mtime,
-                )
-                return 0
 
         try:
             read = _tick_read(c, storage)

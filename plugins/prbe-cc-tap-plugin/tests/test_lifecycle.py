@@ -29,40 +29,6 @@ def _isolated_plugin_dir(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _stat_mtime / _plugin_init_path
-# ---------------------------------------------------------------------------
-
-
-def test_stat_mtime_returns_value_for_real_file(tmp_path: Path) -> None:
-    from tap.main import _stat_mtime
-
-    p = tmp_path / "x"
-    p.write_text("hi")
-    assert _stat_mtime(p) == pytest.approx(p.stat().st_mtime)
-
-
-def test_stat_mtime_returns_none_for_missing_path(tmp_path: Path) -> None:
-    from tap.main import _stat_mtime
-
-    assert _stat_mtime(tmp_path / "does-not-exist") is None
-
-
-def test_stat_mtime_returns_none_for_none_input() -> None:
-    from tap.main import _stat_mtime
-
-    assert _stat_mtime(None) is None
-
-
-def test_plugin_init_path_resolves_to_real_file() -> None:
-    from tap.main import _plugin_init_path
-
-    p = _plugin_init_path()
-    assert p is not None
-    assert p.exists()
-    assert p.name == "__init__.py"
-
-
-# ---------------------------------------------------------------------------
 # _transcript_has_active_reader
 # ---------------------------------------------------------------------------
 
@@ -136,36 +102,6 @@ def _make_watch_config(tmp_path: Path, *, session_id: str = "sess-1"):
         token="fake-token",
         sync_interval_s=1,  # short, but we'll patch sleep anyway
     )
-
-
-def test_run_loop_exits_when_plugin_init_mtime_advances(tmp_path: Path) -> None:
-    """If tap/__init__.py mtime moves forward mid-loop, the daemon exits 0
-    so the wrapper can respawn into the new code."""
-    from tap import config as cfg
-    from tap.main import _run_loop
-    from tap.storage import Storage
-
-    config = _make_watch_config(tmp_path)
-    storage = Storage(cfg.state_db_path())
-    try:
-        # First call returns startup mtime (1000), second returns advanced (2000).
-        mtimes = iter([1000.0, 2000.0])
-
-        def fake_stat_mtime(_p):
-            try:
-                return next(mtimes)
-            except StopIteration:
-                return 2000.0
-
-        with (
-            mock.patch("tap.main._stat_mtime", side_effect=fake_stat_mtime),
-            mock.patch("tap.main.outbox.drain_once", return_value=False),
-            mock.patch("tap.main.time.sleep", return_value=None),
-        ):
-            rc = _run_loop(config, storage)
-        assert rc == 0
-    finally:
-        storage.close()
 
 
 def test_run_loop_exits_and_signals_wrapper_when_orphaned(tmp_path: Path) -> None:
