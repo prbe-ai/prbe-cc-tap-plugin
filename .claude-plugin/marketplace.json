@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "prbe-ai",
+  "description": "Probe — auto-context for Claude Code from your team's operational memory.",
+  "owner": {
+    "name": "Probe",
+    "url": "https://prbe.ai"
+  },
+  "plugins": [
+    {
+      "name": "prbe-cc-tap-plugin",
+      "description": "Ships per-session Claude Code transcripts to Probe for ingestion. Every CC session you start gets indexed into your team's operational memory automatically.",
+      "source": "./plugins/prbe-cc-tap-plugin",
+      "category": "productivity",
+      "tags": ["probe", "ingestion", "transcripts", "knowledge"],
+      "homepage": "https://prbe.ai"
+    }
+  ]
+}
