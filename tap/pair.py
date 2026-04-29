@@ -4,6 +4,12 @@ POSTs to ${API}/agent-tap/pair with {pairing_token, os, hostname}. On
 Success the response carries {device_id, device_token, customer_id}; we
 write the bearer to ${PLUGIN_DIR}/.token (mode 0600) and persist
 device_id/customer_id/paired_at to meta. Any prior last_401_at is cleared.
+
+Re-pair behavior: if a prior pairing exists on this device, its server-side
+device entry is revoked AFTER the new pairing succeeds — so a re-pair never
+leaves an orphan device row in the user's dashboard. The order matters: we
+revoke the old bearer only once we know the new one works, otherwise a bad
+pairing token would strand the user with no working pairing at all.
 """
 
 from __future__ import annotations
@@ -26,10 +32,40 @@ def _os_label() -> str:
     return p
 
 
+def _revoke_old_pairing(bearer: str) -> None:
+    """Best-effort server-side revoke of a prior pairing's bearer.
+
+    Runs after a successful new pair, so:
+      - Success → old device is cleanly retired in the dashboard.
+      - Halt (401: already revoked / unknown) → benign no-op, no message.
+      - Anything else → warn the user that the old device may linger;
+        the new pairing is unaffected.
+    """
+    url = cfg.api_base_url() + cfg.REVOKE_PATH
+    resp = httpclient.post_json(url, json.dumps({}).encode("utf-8"), bearer=bearer)
+    if resp.classification == httpclient.Classification.SUCCESS:
+        print("Revoked previous pairing on this device.")
+        return
+    if resp.classification == httpclient.Classification.HALT:
+        return  # old token already revoked or unknown — nothing to clean up
+    msg = resp.error or f"http {resp.status}"
+    print(
+        f"warning: could not revoke previous pairing ({msg}); the old device "
+        "may still appear in your dashboard's Devices list — revoke it manually "
+        "if it sticks around.",
+        file=sys.stderr,
+    )
+
+
 def run(pairing_token: str) -> int:
     if not pairing_token:
         print("error: pairing token required", file=sys.stderr)
         return 2
+
+    # Capture the old bearer BEFORE the new pair runs. If we picked it up
+    # after writing the new .token we'd just be reading our own new token
+    # back; capturing now keeps the two cleanly separated.
+    old_bearer = cfg.load_token()
 
     body = json.dumps({
         "pairing_token": pairing_token,
@@ -69,6 +105,13 @@ def run(pairing_token: str) -> int:
         storage.delete_meta("last_401_at")
     finally:
         storage.close()
+
+    # New pairing committed. Now retire the old server-side device, if any.
+    # Skipped on first-ever pair (no old_bearer) and when the old happens to
+    # equal the new (defensive — server-side mints are random so this should
+    # never match in practice).
+    if old_bearer and old_bearer != device_token:
+        _revoke_old_pairing(old_bearer)
 
     print(f"Paired. device_id={device_id}")
     return 0
