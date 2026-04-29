@@ -1,8 +1,15 @@
-"""Plugin configuration: paths, env, sync interval, killswitch.
+"""Plugin configuration: paths, env, sync intervals, killswitch.
 
 All paths derive from PRBE_CC_TAP_PLUGIN_DIR (env override) or
 ~/.claude/plugins/prbe-cc-tap-plugin/ so the install script and the
 daemon agree without coordination.
+
+Cadence model: the daemon runs adaptively. While the transcript is
+advancing it ticks at the active interval (default 60s); after two
+consecutive empty ticks it slows to the idle interval (default 300s)
+to reduce backend load on idle CC sessions. A single legacy knob
+(sync_interval_seconds) overrides both — set it if you want a flat
+cadence with no adaptive switching.
 """
 
 from __future__ import annotations
@@ -11,11 +18,13 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 PLUGIN_NAME = "prbe-cc-tap-plugin"
 
 DEFAULT_API_BASE_URL = "https://api.prbe.ai"
-DEFAULT_SYNC_INTERVAL_SECONDS = 300
+DEFAULT_ACTIVE_INTERVAL_SECONDS = 60
+DEFAULT_IDLE_INTERVAL_SECONDS = 300
 
 WEBHOOK_PATH = "/webhooks/claude_code"
 PAIR_PATH = "/agent-tap/pair"
@@ -61,26 +70,64 @@ def api_base_url() -> str:
     return os.environ.get("PRBE_API_BASE_URL", DEFAULT_API_BASE_URL).rstrip("/")
 
 
-def sync_interval_seconds() -> int:
-    """Resolve sync interval from env > .config > default."""
-    env = os.environ.get("PRBE_CC_TAP_INTERVAL_SECONDS")
-    if env:
-        try:
-            n = int(env)
-            if n > 0:
-                return n
-        except ValueError:
-            pass
-    cfg = config_file()
-    if cfg.is_file():
-        try:
-            data = json.loads(cfg.read_text(encoding="utf-8"))
-            n = int(data.get("sync_interval_seconds", DEFAULT_SYNC_INTERVAL_SECONDS))
-            if n > 0:
-                return n
-        except (OSError, ValueError, json.JSONDecodeError):
-            pass
-    return DEFAULT_SYNC_INTERVAL_SECONDS
+def _parse_positive_int(value: Any) -> int | None:
+    """Best-effort positive int. Returns None for missing / unparseable / <= 0."""
+    if value is None:
+        return None
+    try:
+        n = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def _read_config_dict() -> dict[str, Any]:
+    p = config_file()
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def intervals() -> tuple[int, int]:
+    """Return (active_seconds, idle_seconds).
+
+    Resolution order, per knob: env > .config > default.
+
+    Legacy single-knob escape hatch: PRBE_CC_TAP_INTERVAL_SECONDS (env) or
+    `sync_interval_seconds` (config) — if set, applies to BOTH active and
+    idle. For users who want flat cadence with no adaptive switching.
+
+    Idle is clamped to >= active so we never accidentally tick faster when
+    the user thinks they've slowed us down.
+    """
+    config_data = _read_config_dict()
+
+    # Legacy override path — flat cadence.
+    legacy_env = _parse_positive_int(os.environ.get("PRBE_CC_TAP_INTERVAL_SECONDS"))
+    if legacy_env is not None:
+        return legacy_env, legacy_env
+    legacy_cfg = _parse_positive_int(config_data.get("sync_interval_seconds"))
+    if legacy_cfg is not None:
+        return legacy_cfg, legacy_cfg
+
+    # Adaptive path.
+    active = (
+        _parse_positive_int(os.environ.get("PRBE_CC_TAP_ACTIVE_INTERVAL_SECONDS"))
+        or _parse_positive_int(config_data.get("active_interval_seconds"))
+        or DEFAULT_ACTIVE_INTERVAL_SECONDS
+    )
+    idle = (
+        _parse_positive_int(os.environ.get("PRBE_CC_TAP_IDLE_INTERVAL_SECONDS"))
+        or _parse_positive_int(config_data.get("idle_interval_seconds"))
+        or DEFAULT_IDLE_INTERVAL_SECONDS
+    )
+    if idle < active:
+        idle = active
+    return active, idle
 
 
 def load_token() -> str | None:
@@ -134,7 +181,8 @@ class WatchConfig:
     cwd: Path
     plugin_root: Path
     token: str
-    sync_interval_s: int
+    active_interval_s: int
+    idle_interval_s: int
 
     @property
     def shutdown_sentinel(self) -> Path:

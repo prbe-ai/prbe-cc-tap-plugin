@@ -44,7 +44,11 @@ def run() -> int:
         print(f"  paired:        {_relative(storage.get_meta('paired_at'))}")
         print(f"  last shipped:  {_relative(storage.get_meta('last_successful_post_at'))}")
         print(f"  outbox:        {storage.outbox_row_count()} rows, {storage.outbox_byte_size()} bytes")
-        print(f"  interval:      {cfg.sync_interval_seconds()}s")
+        active_s, idle_s = cfg.intervals()
+        if active_s == idle_s:
+            print(f"  interval:      {active_s}s (flat)")
+        else:
+            print(f"  interval:      {active_s}s active / {idle_s}s idle")
         return 0
     finally:
         storage.close()

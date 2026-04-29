@@ -5,4 +5,4 @@ to api.prbe.ai/webhooks/claude_code. State and lifecycle are owned by
 Claude Code's session hooks — daemon dies when the session ends.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"

@@ -100,7 +100,8 @@ def _make_watch_config(tmp_path: Path, *, session_id: str = "sess-1"):
         cwd=tmp_path,
         plugin_root=Path("/nonexistent"),
         token="fake-token",
-        sync_interval_s=1,  # short, but we'll patch sleep anyway
+        active_interval_s=1,  # short, but we'll patch sleep anyway
+        idle_interval_s=1,
     )
 
 

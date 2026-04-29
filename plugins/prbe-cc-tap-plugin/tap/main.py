@@ -1,8 +1,14 @@
 """Daemon loop — `python -m tap watch ...`.
 
-Spawned by hooks/session-start.sh. Owns its own lifecycle for the duration
-of the Claude Code session: ticks every sync_interval_seconds, reads new
-transcript content, batches + enqueues, then drains the outbox.
+Spawned by hooks/session-start.sh. Reads new transcript content, batches +
+enqueues, drains the outbox, sleeps, repeats.
+
+Adaptive cadence: ticks at the active interval (default 60s) while the
+transcript is advancing; after IDLE_THRESHOLD_TICKS consecutive empty ticks
+falls back to the idle interval (default 300s). A user typing in CC gets
+near-real-time ingestion; an idle session stops generating backend traffic.
+Set sync_interval_seconds in .config for a flat cadence that disables
+adaptive switching.
 
 Exits cleanly on:
   - SIGTERM/SIGINT
@@ -39,9 +45,15 @@ log = logging.getLogger("prbe-cc-tap")
 # Drain budget per tick — keep ticking responsive even if many batches are due.
 MAX_DRAIN_PER_TICK = 64
 
+# Switch to idle cadence after this many consecutive empty ticks (no new
+# transcript bytes). 2 means: a single empty tick stays on active in case
+# the user is mid-sentence; two in a row means they've stopped typing.
+IDLE_THRESHOLD_TICKS = 2
+
 # Run the orphan-session check (lsof on transcript) every N ticks. At the
-# default 5min sync_interval, 12 ticks ≈ 1 hour. lsof is a subprocess and
-# we don't need fast detection — orphans only matter for tidy cleanup.
+# active interval, 12 ticks ≈ 12 minutes; at idle, ≈ 1 hour. lsof is a
+# subprocess and we don't need fast detection — orphans only matter for
+# tidy cleanup.
 ORPHAN_CHECK_EVERY_TICKS = 12
 
 # Hard cap on how long we'll wait for lsof to return; if it hangs, we'd
@@ -123,13 +135,15 @@ def main(argv: list[str] | None = None) -> int:
         log.info("no token at %s; run `python -m tap pair <token>` first", cfg.token_file())
         return 0
 
+    active_s, idle_s = cfg.intervals()
     config = cfg.WatchConfig(
         session_id=args.session_id,
         transcript_path=args.transcript,
         cwd=args.cwd,
         plugin_root=args.plugin_root,
         token=token,
-        sync_interval_s=cfg.sync_interval_seconds(),
+        active_interval_s=active_s,
+        idle_interval_s=idle_s,
     )
 
     storage = Storage(cfg.state_db_path())
@@ -140,8 +154,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     log.info(
-        "tap starting session=%s transcript=%s cwd=%s interval=%ds",
-        config.session_id, config.transcript_path, config.cwd, config.sync_interval_s,
+        "tap starting session=%s transcript=%s cwd=%s active=%ds idle=%ds",
+        config.session_id, config.transcript_path, config.cwd,
+        config.active_interval_s, config.idle_interval_s,
     )
     try:
         return _run_loop(config, storage)
@@ -159,6 +174,8 @@ def _run_loop(c: cfg.WatchConfig, storage: Storage) -> int:
 
     missing_ticks = 0
     tick_count = 0
+    empty_ticks = 0
+    in_idle_mode = False
 
     # Track whether we ever saw a process holding the transcript fd. Without
     # this gate, an early lsof miss (e.g. before CC has fully opened the file)
@@ -248,9 +265,27 @@ def _run_loop(c: cfg.WatchConfig, storage: Storage) -> int:
                     pass
                 return 0
 
+        # Adaptive cadence: a tick that produced new lines resets to active;
+        # IDLE_THRESHOLD_TICKS empty ticks in a row promotes to idle. We
+        # treat "transcript missing" the same as empty since there's nothing
+        # to ship either way.
+        had_lines = read is not None and bool(read[0])
+        if had_lines:
+            empty_ticks = 0
+            if in_idle_mode:
+                log.info("activity resumed; switching to active cadence (%ds)", c.active_interval_s)
+                in_idle_mode = False
+        else:
+            empty_ticks += 1
+            if empty_ticks == IDLE_THRESHOLD_TICKS and not in_idle_mode:
+                log.info("idle for %d ticks; switching to idle cadence (%ds)",
+                         empty_ticks, c.idle_interval_s)
+                in_idle_mode = True
+        sleep_s = c.idle_interval_s if in_idle_mode else c.active_interval_s
+
         # Sleep in 1s slices so SIGTERM/sentinel/killswitch are responsive.
         slept = 0
-        while slept < c.sync_interval_s and not _shutdown_observed(c):
+        while slept < sleep_s and not _shutdown_observed(c):
             time.sleep(1)
             slept += 1
 

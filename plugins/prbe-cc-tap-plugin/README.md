@@ -59,19 +59,44 @@ Keeping state at a stable path means version bumps don't require re-pairing.
 | File | Purpose |
 |------|---------|
 | `.token` | Bearer token (mode 0600). Provisioned by `pair`. |
-| `.config` | JSON `{"sync_interval_seconds": 300}`. Default 300. |
+| `.config` | JSON for cadence overrides — see below. |
 | `.disabled` | Presence disables the daemon entirely. |
 | `.disabled_paths` | Newline-separated cwd prefixes to skip. |
 | `state.db` | sqlite: file_offsets, outbox, meta. |
 | `logs/<session_id>.log` | Per-session log file. |
 
-## Configuration
+## Cadence
 
-Change the sync interval to 60 seconds:
+The daemon is adaptive by default:
+
+- **Active mode (60s)** while the transcript is advancing
+- **Idle mode (300s)** after two consecutive empty ticks (≈2 min of no
+  new transcript content)
+
+Active resumes the moment new lines appear. This keeps ingestion near
+real-time during work without flooding the backend on idle CC sessions.
+
+Override either side via `.config`:
 
 ```bash
-echo '{"sync_interval_seconds": 60}' > ~/.claude/plugins/prbe-cc-tap-plugin/.config
+# Tighter active cadence; same idle.
+echo '{"active_interval_seconds": 30}' \
+  > ~/.claude/plugins/prbe-cc-tap-plugin/.config
+
+# Both knobs.
+echo '{"active_interval_seconds": 30, "idle_interval_seconds": 600}' \
+  > ~/.claude/plugins/prbe-cc-tap-plugin/.config
 ```
+
+Or disable adaptive switching entirely with the legacy single knob — sets
+both active and idle to the same value:
+
+```bash
+echo '{"sync_interval_seconds": 60}' \
+  > ~/.claude/plugins/prbe-cc-tap-plugin/.config
+```
+
+## Other configuration
 
 Disable for one specific repo:
 
@@ -90,7 +115,9 @@ touch ~/.claude/plugins/prbe-cc-tap-plugin/.disabled
 | Variable | Purpose |
 |----------|---------|
 | `PRBE_API_BASE_URL` | Override base URL (default `https://api.prbe.ai`). |
-| `PRBE_CC_TAP_INTERVAL_SECONDS` | Override sync interval. |
+| `PRBE_CC_TAP_ACTIVE_INTERVAL_SECONDS` | Override active interval. |
+| `PRBE_CC_TAP_IDLE_INTERVAL_SECONDS` | Override idle interval. |
+| `PRBE_CC_TAP_INTERVAL_SECONDS` | Legacy single-knob — applies to both. |
 | `PRBE_CC_TAP_PLUGIN_DIR` | Override state directory (for tests). |
 | `PRBE_CC_TAP_TOKEN` | Override `.token` (for tests/dev). |
 
