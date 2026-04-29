@@ -4,7 +4,15 @@ What we ship: the *conversation* — user prompts, assistant text + thinking,
 plus a one-line marker for each tool call. Everything else is noise:
   - Anthropic API metadata (token-usage tallies, cache stats, request ids,
     big base64 signature blobs on thinking blocks)
-  - CC-internal bookkeeping events (stop_hook_summary, turn_duration)
+  - CC-internal bookkeeping events:
+      * `stop_hook_summary`, `turn_duration` (system subtypes)
+      * `file-history-snapshot` (75% of payload weight; pure backup metadata)
+      * `last-prompt`, `ai-title`, `permission-mode` (UI / mode plumbing)
+  - Top-level fields duplicated on every event: `cwd`, `gitBranch`,
+    `sessionId` (already on the doc), plus pure CC plumbing
+    (`promptId`, `entrypoint`, `userType`, `version`, `slug`).
+  - Empty `thinking: ""` blocks (assistant turns where the model didn't
+    surface any reasoning text — the empty block carries no content).
   - Full tool_use `input` args (the entire Bash script body, the full
     old_string/new_string of an Edit, the search/replace bodies, …)
   - Full tool_result `content` (file contents, command output, search
@@ -25,13 +33,35 @@ from __future__ import annotations
 
 from typing import Any
 
-# Top-level fields to drop from every event. These are CC bookkeeping or
-# Anthropic API metadata, never content.
+# Top-level event types to drop entirely. These are CC-internal bookkeeping
+# with no conversational content. file-history-snapshot dominates payload
+# weight (~75% of typical session bytes); the others are smaller but pure
+# UI/mode plumbing that contribute zero retrieval signal.
+_DROP_EVENT_TYPES: frozenset[str] = frozenset({
+    "file-history-snapshot",
+    "last-prompt",
+    "ai-title",
+    "permission-mode",
+})
+
+# Top-level fields to drop from every retained event. These are duplicated
+# on every event but already present once at the document level (cwd,
+# gitBranch, sessionId) or pure CC plumbing that never has retrieval value
+# (promptId, entrypoint, userType, version, slug, sourceToolAssistantUUID).
 _DROP_TOP_LEVEL: frozenset[str] = frozenset({
     "requestId",
     "isSidechain",
     "isMeta",
     "diagnostics",
+    "promptId",
+    "entrypoint",
+    "userType",
+    "version",
+    "slug",
+    "sessionId",
+    "cwd",
+    "gitBranch",
+    "sourceToolAssistantUUID",
 })
 
 # Fields inside `message` that are pure API/runtime metadata, not content.
@@ -45,7 +75,8 @@ _DROP_MESSAGE: frozenset[str] = frozenset({
     "stop_details",
     "stop_sequence",
     "diagnostics",
-    "id",  # Anthropic's per-message API id; we already keep top-level uuid
+    "id",    # Anthropic's per-message API id; we already keep top-level uuid
+    "type",  # Inner Anthropic shape ("message"); redundant with outer event type
 })
 
 # `system` events with these subtypes have no content — drop entirely.
@@ -93,6 +124,11 @@ def sanitize_event(event: Any) -> Any:
     if not isinstance(event, dict):
         return event
 
+    # Drop entire bookkeeping event types (file-history-snapshot, last-prompt,
+    # ai-title, permission-mode). These never carry conversational content.
+    if event.get("type") in _DROP_EVENT_TYPES:
+        return None
+
     # Drop CC-internal system events with no content value.
     if event.get("type") == "system":
         sub = event.get("subtype")
@@ -106,7 +142,9 @@ def sanitize_event(event: Any) -> Any:
         msg_out = {k: v for k, v in msg.items() if k not in _DROP_MESSAGE}
         content = msg_out.get("content")
         if isinstance(content, list):
-            msg_out["content"] = [_sanitize_block(b) for b in content]
+            sanitized_blocks = [_sanitize_block(b) for b in content]
+            # Drop blocks that came back as None (empty thinking, etc).
+            msg_out["content"] = [b for b in sanitized_blocks if b is not None]
         out["message"] = msg_out
 
     return out
@@ -129,7 +167,8 @@ def _sanitize_block(block: Any) -> Any:
     """Per-content-block sanitization.
 
     text       → unchanged (it's the conversation).
-    thinking   → drop signature, keep thinking text.
+    thinking   → drop signature; if remaining `thinking` text is empty/
+                 whitespace, return None so the caller drops the block.
     tool_use   → drop input, keep id+name + one-line summary.
     tool_result→ drop content, keep tool_use_id + is_error (when truthy).
     other      → unchanged (forward-compat for new block types).
@@ -140,6 +179,10 @@ def _sanitize_block(block: Any) -> Any:
     btype = block.get("type")
 
     if btype == "thinking":
+        thinking_text = block.get("thinking")
+        if not isinstance(thinking_text, str) or not thinking_text.strip():
+            # Empty thinking blocks add zero signal but inflate payload + chunks.
+            return None
         return {k: v for k, v in block.items() if k not in _THINKING_DROP}
 
     if btype == "tool_use":

@@ -76,6 +76,9 @@ def test_drops_request_id_and_meta_flags() -> None:
 
 
 def test_keeps_threading_metadata() -> None:
+    """uuid + parentUuid + timestamp survive — they're the only threading
+    info downstream actually uses. sessionId/cwd/gitBranch/userType are
+    redundant per-event (already on the doc) and now get stripped."""
     event = {
         "type": "assistant",
         "uuid": "u",
@@ -89,11 +92,152 @@ def test_keeps_threading_metadata() -> None:
     out = sanitize_event(event)
     assert out["uuid"] == "u"
     assert out["parentUuid"] == "p"
-    assert out["sessionId"] == "s"
     assert out["timestamp"] == "2026-04-29T19:31:18.640Z"
-    assert out["userType"] == "external"
-    assert out["cwd"] == "/x"
-    assert out["gitBranch"] == "main"
+    # These are dropped — already on the doc, redundant per-event.
+    assert "sessionId" not in out
+    assert "userType" not in out
+    assert "cwd" not in out
+    assert "gitBranch" not in out
+
+
+def test_drops_file_history_snapshot_event() -> None:
+    """file-history-snapshot events are CC's per-turn file backup index —
+    pure bookkeeping, no conversational content, ~75% of typical session
+    bytes. Drop entirely."""
+    event = {
+        "type": "file-history-snapshot",
+        "messageId": "abc",
+        "snapshot": {"trackedFileBackups": {"foo.py": {"version": 1}}},
+        "uuid": "u",
+    }
+    assert sanitize_event(event) is None
+
+
+def test_drops_last_prompt_event() -> None:
+    """last-prompt is CC's lookahead of what's about to be sent — duplicates
+    the user message that follows."""
+    event = {
+        "type": "last-prompt",
+        "lastPrompt": "do the thing",
+        "leafUuid": "x",
+        "sessionId": "y",
+    }
+    assert sanitize_event(event) is None
+
+
+def test_drops_ai_title_event() -> None:
+    """ai-title is the CC-generated session title — not currently used
+    downstream."""
+    event = {
+        "type": "ai-title",
+        "aiTitle": "Convert agent to plugin",
+        "sessionId": "y",
+    }
+    assert sanitize_event(event) is None
+
+
+def test_drops_permission_mode_event() -> None:
+    """permission-mode is operational state, not content."""
+    event = {
+        "type": "permission-mode",
+        "permissionMode": "bypassPermissions",
+        "sessionId": "y",
+    }
+    assert sanitize_event(event) is None
+
+
+def test_drops_promptid_entrypoint_version_slug() -> None:
+    """Top-level CC plumbing fields that appear on every event but never
+    carry retrieval signal."""
+    event = {
+        "type": "user",
+        "uuid": "u",
+        "promptId": "abc",
+        "entrypoint": "cli",
+        "version": "2.1.123",
+        "slug": "jazzy-drifting-bee",
+        "sourceToolAssistantUUID": "z",
+        "timestamp": "2026-04-29T19:31:18.640Z",
+    }
+    out = sanitize_event(event)
+    for k in ("promptId", "entrypoint", "version", "slug", "sourceToolAssistantUUID"):
+        assert k not in out, f"{k} should have been dropped"
+    assert out["uuid"] == "u"
+    assert out["timestamp"] == "2026-04-29T19:31:18.640Z"
+
+
+def test_drops_inner_message_type() -> None:
+    """`message.type = "message"` is the Anthropic API shape; redundant with
+    the outer event type ("assistant" / "user")."""
+    event = {
+        "type": "assistant",
+        "uuid": "u",
+        "message": {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}],
+        },
+    }
+    out = sanitize_event(event)
+    assert "type" not in out["message"]
+    assert out["message"]["role"] == "assistant"
+    assert out["type"] == "assistant"  # outer type survives
+
+
+def test_drops_empty_thinking_block() -> None:
+    """Some assistant turns emit `{"type": "thinking", "thinking": ""}` with
+    no text — pure overhead."""
+    event = {
+        "type": "assistant",
+        "uuid": "u",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": ""},
+                {"type": "text", "text": "answer"},
+            ],
+        },
+    }
+    out = sanitize_event(event)
+    blocks = out["message"]["content"]
+    assert len(blocks) == 1
+    assert blocks[0] == {"type": "text", "text": "answer"}
+
+
+def test_drops_whitespace_only_thinking_block() -> None:
+    event = {
+        "type": "assistant",
+        "uuid": "u",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "   \n\n  "},
+                {"type": "text", "text": "answer"},
+            ],
+        },
+    }
+    out = sanitize_event(event)
+    blocks = out["message"]["content"]
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "text"
+
+
+def test_keeps_non_empty_thinking_block_after_signature_drop() -> None:
+    """Thinking with real text + signature: keep the text, drop the signature."""
+    event = {
+        "type": "assistant",
+        "uuid": "u",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Real reasoning.", "signature": "BIG"},
+            ],
+        },
+    }
+    out = sanitize_event(event)
+    block = out["message"]["content"][0]
+    assert block["thinking"] == "Real reasoning."
+    assert "signature" not in block
 
 
 # ---------------------------------------------------------------------------
