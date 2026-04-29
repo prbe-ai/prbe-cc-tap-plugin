@@ -173,36 +173,152 @@ def test_drops_thinking_signature_keeps_thinking_text() -> None:
     assert blocks[1] == {"type": "text", "text": "Here's my answer."}
 
 
-def test_passes_through_tool_use_and_tool_result_blocks() -> None:
-    """Tool calls + results are content — don't strip anything from them."""
+def test_tool_use_keeps_first_line_of_command_drops_full_input() -> None:
+    """tool_use ships {type, id, name, summary} only. Full `input` is dropped —
+    Bash command bodies, Edit old/new strings, etc. are too noisy to ship."""
     event = {
         "type": "assistant",
         "uuid": "u",
         "message": {
             "role": "assistant",
-            "content": [
-                {
-                    "type": "tool_use",
-                    "id": "tool_1",
-                    "name": "Bash",
-                    "input": {"command": "ls", "description": "list files"},
+            "content": [{
+                "type": "tool_use",
+                "id": "tool_1",
+                "name": "Bash",
+                "input": {
+                    "command": "git log --oneline\ngit diff HEAD~1\nrm -rf tmp",
+                    "description": "inspect and clean",
+                    "timeout": 30,
                 },
-                {
-                    "type": "tool_result",
-                    "tool_use_id": "tool_1",
-                    "content": "file1\nfile2\n",
-                    "is_error": False,
-                },
-            ],
+            }],
         },
     }
-    out = sanitize_event(event)
-    blocks = out["message"]["content"]
-    assert blocks[0]["type"] == "tool_use"
-    assert blocks[0]["name"] == "Bash"
-    assert blocks[0]["input"] == {"command": "ls", "description": "list files"}
-    assert blocks[1]["type"] == "tool_result"
-    assert blocks[1]["content"] == "file1\nfile2\n"
+    block = sanitize_event(event)["message"]["content"][0]
+    assert block == {
+        "type": "tool_use",
+        "id": "tool_1",
+        "name": "Bash",
+        "summary": "git log --oneline",
+    }
+    assert "input" not in block
+
+
+def test_tool_use_falls_back_to_file_path_for_read() -> None:
+    event = {
+        "type": "assistant",
+        "uuid": "u",
+        "message": {"role": "assistant", "content": [{
+            "type": "tool_use", "id": "t", "name": "Read",
+            "input": {"file_path": "/tmp/notes.md", "limit": 100, "offset": 0},
+        }]},
+    }
+    block = sanitize_event(event)["message"]["content"][0]
+    assert block["summary"] == "/tmp/notes.md"
+
+
+def test_tool_use_summary_for_edit_uses_file_path_not_old_string() -> None:
+    """Edit has file_path + old_string + new_string. We summarize by path,
+    not by leaking the diff content."""
+    event = {
+        "type": "assistant",
+        "uuid": "u",
+        "message": {"role": "assistant", "content": [{
+            "type": "tool_use", "id": "t", "name": "Edit",
+            "input": {
+                "file_path": "/repo/src/app.py",
+                "old_string": "def foo():\n    pass\n",
+                "new_string": "def foo():\n    return 42\n",
+            },
+        }]},
+    }
+    block = sanitize_event(event)["message"]["content"][0]
+    assert block["summary"] == "/repo/src/app.py"
+
+
+def test_tool_use_summary_for_grep_uses_pattern() -> None:
+    event = {
+        "type": "assistant",
+        "uuid": "u",
+        "message": {"role": "assistant", "content": [{
+            "type": "tool_use", "id": "t", "name": "Grep",
+            "input": {"pattern": "TODO|FIXME", "path": "src/"},
+        }]},
+    }
+    block = sanitize_event(event)["message"]["content"][0]
+    # `pattern` wins over `path` per the priority list, but `path` would
+    # otherwise have been a valid summary too.
+    assert block["summary"] == "TODO|FIXME"
+
+
+def test_tool_use_summary_caps_at_max_len() -> None:
+    """A multi-thousand-char single-line command gets clipped."""
+    long_cmd = "echo " + "a" * 1000
+    event = {
+        "type": "assistant",
+        "uuid": "u",
+        "message": {"role": "assistant", "content": [{
+            "type": "tool_use", "id": "t", "name": "Bash",
+            "input": {"command": long_cmd},
+        }]},
+    }
+    block = sanitize_event(event)["message"]["content"][0]
+    assert len(block["summary"]) == 200
+
+
+def test_tool_use_unknown_schema_has_no_summary_key() -> None:
+    """Tools whose schema has none of the known summary keys ship with no
+    summary at all, rather than us guessing and leaking a random arg."""
+    event = {
+        "type": "assistant",
+        "uuid": "u",
+        "message": {"role": "assistant", "content": [{
+            "type": "tool_use", "id": "t", "name": "MysteryMcpTool",
+            "input": {"some_obscure_key": "with secret value"},
+        }]},
+    }
+    block = sanitize_event(event)["message"]["content"][0]
+    assert block == {"type": "tool_use", "id": "t", "name": "MysteryMcpTool"}
+    assert "summary" not in block
+
+
+def test_tool_result_drops_content_keeps_only_threading() -> None:
+    """tool_result `content` (file reads, command output, search results) is
+    the single biggest payload chunk in real sessions. We drop it entirely."""
+    big_output = "\n".join(f"line {i}" for i in range(1000))
+    event = {
+        "type": "user",
+        "uuid": "u",
+        "message": {"role": "user", "content": [{
+            "type": "tool_result",
+            "tool_use_id": "tool_1",
+            "content": big_output,
+            "is_error": False,
+        }]},
+    }
+    block = sanitize_event(event)["message"]["content"][0]
+    assert block == {"type": "tool_result", "tool_use_id": "tool_1"}
+    assert "content" not in block
+    assert "is_error" not in block, "is_error=False is the default; don't ship it"
+
+
+def test_tool_result_keeps_is_error_when_truthy() -> None:
+    event = {
+        "type": "user",
+        "uuid": "u",
+        "message": {"role": "user", "content": [{
+            "type": "tool_result",
+            "tool_use_id": "tool_1",
+            "content": "Error: file not found",
+            "is_error": True,
+        }]},
+    }
+    block = sanitize_event(event)["message"]["content"][0]
+    assert block == {
+        "type": "tool_result",
+        "tool_use_id": "tool_1",
+        "is_error": True,
+    }
+    assert "content" not in block
 
 
 def test_user_event_with_text_content_kept_intact() -> None:
@@ -342,6 +458,53 @@ def test_build_batch_body_strips_thinking_signature_and_usage() -> None:
     assert blocks[1] == {"type": "text", "text": "answer"}
     # Sanity: payload is much smaller than what it would have been with the signature.
     assert len(body) < 1000, f"payload should be under 1KB after stripping, got {len(body)}"
+
+
+def test_build_batch_body_drops_tool_io_aggressively() -> None:
+    """Realistic shape: an assistant tool_use + the user-side tool_result
+    that follows. Verify the full Bash script body and the multi-KB output
+    are both gone from the wire payload."""
+    big_command = "for i in $(seq 1 100); do echo hello world $i; done\nls -la /tmp"
+    big_output = "hello world\n" * 5000  # ~60KB of output
+    body = build_batch_body(
+        device_id="dev",
+        session_id="sess",
+        batch_seq=0,
+        cwd="/x",
+        base_line_no=0,
+        lines=[
+            _line({
+                "type": "assistant",
+                "uuid": "a1",
+                "message": {"role": "assistant", "content": [{
+                    "type": "tool_use", "id": "tool_x", "name": "Bash",
+                    "input": {"command": big_command, "description": "bulk run"},
+                }]},
+            }),
+            _line({
+                "type": "user",
+                "uuid": "u1",
+                "message": {"role": "user", "content": [{
+                    "type": "tool_result", "tool_use_id": "tool_x",
+                    "content": big_output, "is_error": False,
+                }]},
+            }),
+        ],
+    )
+    assert body is not None
+    parsed = json.loads(body)
+    # tool_use kept name + first line summary, dropped command body
+    use_block = parsed["events"][0]["raw"]["message"]["content"][0]
+    assert use_block["name"] == "Bash"
+    assert use_block["summary"] == "for i in $(seq 1 100); do echo hello world $i; done"
+    assert "input" not in use_block
+    # tool_result has only threading info
+    res_block = parsed["events"][1]["raw"]["message"]["content"][0]
+    assert res_block == {"type": "tool_result", "tool_use_id": "tool_x"}
+    # The 60KB output reduced to a few hundred bytes total.
+    assert len(body) < 1000, f"expected aggressive shrink, got {len(body)} bytes"
+    assert big_output not in body.decode("utf-8")
+    assert big_command not in body.decode("utf-8")
 
 
 if __name__ == "__main__":

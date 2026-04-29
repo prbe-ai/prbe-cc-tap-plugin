@@ -1,14 +1,18 @@
 """Sanitize Claude Code transcript events before shipping.
 
-The raw JSONL Claude Code writes is bloated with API metadata that has no
-value for the knowledge graph: token-usage tallies, cache stats, big base64
-`signature` blobs on thinking blocks, internal CC bookkeeping events
-(`stop_hook_summary`, `turn_duration`).
+What we ship: the *conversation* — user prompts, assistant text + thinking,
+plus a one-line marker for each tool call. Everything else is noise:
+  - Anthropic API metadata (token-usage tallies, cache stats, request ids,
+    big base64 signature blobs on thinking blocks)
+  - CC-internal bookkeeping events (stop_hook_summary, turn_duration)
+  - Full tool_use `input` args (the entire Bash script body, the full
+    old_string/new_string of an Edit, the search/replace bodies, …)
+  - Full tool_result `content` (file contents, command output, search
+    results — usually the single largest chunk of any session payload)
 
-What we actually want to send is the *content*: user prompts, assistant text,
-tool calls, tool results — plus the threading metadata (uuid, parentUuid,
-sessionId, timestamp, role) needed to reconstruct the conversation
-downstream. Everything else is noise.
+We KEEP enough of each tool block to reconstruct what happened:
+  - tool_use:    type, id, name, summary  (first line of command/path/etc)
+  - tool_result: type, tool_use_id, is_error (only when truthy)
 
 `sanitize_event(event)` returns:
   - None        → drop the event entirely (CC bookkeeping with no content)
@@ -53,14 +57,36 @@ _DROP_SYSTEM_SUBTYPES: frozenset[str] = frozenset({
 })
 
 # `thinking` blocks carry both a `thinking` text field (content — keep) and
-# a `signature` field (huge base64-encoded model state — drop). Stripping
-# signature shrinks payloads dramatically without losing any human-readable
-# content.
+# a `signature` field (huge base64-encoded model state — drop).
 _THINKING_DROP: frozenset[str] = frozenset({"signature"})
+
+# When summarizing a tool_use's `input`, pick the FIRST key from this list
+# that holds a non-empty string. Order matches "most identifying" per tool:
+#   command     — Bash (the actual shell line)
+#   file_path   — Read / Edit / Write / NotebookEdit
+#   pattern     — Grep / Glob (the search expression — more identifying than path)
+#   url         — WebFetch
+#   query       — WebSearch / search-style MCP tools
+#   path        — generic fallback for tools that name it `path` (lower than
+#                 pattern so Grep is summarized by what it searches for)
+#   description — last-resort fallback for tools whose schema we don't know
+_TOOL_SUMMARY_KEYS: tuple[str, ...] = (
+    "command",
+    "file_path",
+    "pattern",
+    "url",
+    "query",
+    "path",
+    "description",
+)
+
+# Hard cap on the summary length so a runaway one-line value (e.g. a
+# minified script jammed onto one line) can't bloat payloads on its own.
+_TOOL_SUMMARY_MAX_LEN = 200
 
 
 def sanitize_event(event: Any) -> Any:
-    """Trim a transcript event to ship only content, not Anthropic API metadata.
+    """Trim a transcript event to ship only the conversation, not metadata.
 
     Returns None for events that should be dropped entirely.
     """
@@ -86,13 +112,51 @@ def sanitize_event(event: Any) -> Any:
     return out
 
 
+def _summarize_tool_input(value: Any) -> str:
+    """First line of the most informative input field, capped. Empty string
+    if no recognized key exists."""
+    if not isinstance(value, dict):
+        return ""
+    for key in _TOOL_SUMMARY_KEYS:
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate:
+            first_line = candidate.splitlines()[0]
+            return first_line[:_TOOL_SUMMARY_MAX_LEN]
+    return ""
+
+
 def _sanitize_block(block: Any) -> Any:
-    """Per-content-block sanitization. Currently: drop the giant `signature`
-    field on thinking blocks. Other block types pass through unchanged so
-    we don't accidentally drop content (e.g. tool_use input args, tool_result
-    output content, plain text)."""
+    """Per-content-block sanitization.
+
+    text       → unchanged (it's the conversation).
+    thinking   → drop signature, keep thinking text.
+    tool_use   → drop input, keep id+name + one-line summary.
+    tool_result→ drop content, keep tool_use_id + is_error (when truthy).
+    other      → unchanged (forward-compat for new block types).
+    """
     if not isinstance(block, dict):
         return block
-    if block.get("type") == "thinking":
+
+    btype = block.get("type")
+
+    if btype == "thinking":
         return {k: v for k, v in block.items() if k not in _THINKING_DROP}
+
+    if btype == "tool_use":
+        out: dict[str, Any] = {
+            "type": "tool_use",
+            "id": block.get("id"),
+            "name": block.get("name"),
+        }
+        summary = _summarize_tool_input(block.get("input"))
+        if summary:
+            out["summary"] = summary
+        return out
+
+    if btype == "tool_result":
+        out = {"type": "tool_result", "tool_use_id": block.get("tool_use_id")}
+        if block.get("is_error"):
+            out["is_error"] = True
+        return out
+
     return block
