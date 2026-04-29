@@ -57,6 +57,7 @@ All under `~/.claude/plugins/prbe-cc-tap-plugin/` (override via
 | `.config` | JSON `{"sync_interval_seconds": 300}`. Default 300. |
 | `.disabled` | Presence disables the daemon entirely. |
 | `.disabled_paths` | Newline-separated cwd prefixes to skip. |
+| `.no-auto-update` | Presence skips the SessionStart auto-update. |
 | `state.db` | sqlite: file_offsets, outbox, meta. |
 | `logs/<session_id>.log` | Per-session log file. |
 
@@ -78,6 +79,25 @@ Disable entirely:
 
 ```bash
 touch ~/.claude/plugins/prbe-cc-tap-plugin/.disabled
+```
+
+## Updates
+
+Each Claude Code session start runs `git fetch + git merge --ff-only` against
+`origin/main` on `~/.claude/plugins/prbe-cc-tap-plugin/`. If the network is
+down, the plugin diverges from origin, or anything else fails, the existing
+on-disk code is used and the session is never blocked.
+
+If a daemon is already running for this user when an update lands on disk,
+its `tap/__init__.py` mtime check picks up the new code on the next tick and
+exits cleanly so the wrapper respawns into it.
+
+To force an update outside a session, just re-run the install one-liner —
+it's idempotent. To pin a version (e.g. while iterating locally with a
+worktree), block auto-update:
+
+```bash
+touch ~/.claude/plugins/prbe-cc-tap-plugin/.no-auto-update
 ```
 
 ## Environment variables

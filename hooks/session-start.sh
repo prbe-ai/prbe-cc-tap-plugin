@@ -38,6 +38,29 @@ if [ ! -f "$PLUGIN_DIR/.token" ] && [ -z "${PRBE_CC_TAP_TOKEN:-}" ]; then
     exit 0
 fi
 
+# Auto-update plugin code from origin/main before each session.
+#
+# Best-effort: any failure (offline, diverged tree, force-push that breaks
+# ff-only, $PLUGIN_ROOT not a git checkout) falls through and we spawn the
+# existing on-disk code. Updating must NEVER block CC session start.
+#
+# Skipped when $PLUGIN_DIR/.no-auto-update exists — escape hatch for users
+# who pin a version or develop locally with a worktree they don't want
+# clobbered.
+#
+# Update happens before the pidfile check on purpose: even if a daemon is
+# already running for this session_id (resume), we want the on-disk code to
+# reflect origin so the daemon's own mtime-detection picks it up next tick.
+if [ ! -f "$PLUGIN_DIR/.no-auto-update" ] && [ -d "$PLUGIN_ROOT/.git" ]; then
+    if git -C "$PLUGIN_ROOT" fetch --quiet origin main 2>>"$LOG_FILE" \
+       && git -C "$PLUGIN_ROOT" merge --ff-only --quiet FETCH_HEAD 2>>"$LOG_FILE"; then
+        NEW_HEAD=$(git -C "$PLUGIN_ROOT" rev-parse --short HEAD 2>/dev/null || echo "?")
+        echo "[$(date -u +%FT%TZ)] auto-update: synced to origin/main ($NEW_HEAD)" >>"$LOG_FILE"
+    else
+        echo "[$(date -u +%FT%TZ)] auto-update: skipped (fetch/merge failed; using on-disk code)" >>"$LOG_FILE"
+    fi
+fi
+
 PID_FILE="/tmp/prbe-cc-tap-watcher-${SESSION_ID}.pid"
 
 # If a daemon is already running for this session_id (e.g. resumed session),
