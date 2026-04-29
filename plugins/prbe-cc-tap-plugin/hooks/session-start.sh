@@ -58,11 +58,19 @@ fi
 
 # Crash-recovery wrapper: respawn up to 5 times per minute.
 # Self-terminates when shutdown sentinel exists (SessionEnd touches it).
+#
+# Why a SIGTERM trap that forwards to the python child: macOS doesn't ship
+# `setsid` so we can't put the wrapper + daemon in their own process group
+# and rely on `kill -TERM -<pgid>` to take down both at once. Instead we
+# detach via `nohup ... & disown` (POSIX-portable) and have the wrapper
+# bash forward SIGTERM/SIGINT explicitly to the python child it spawns.
 WRAPPER_SCRIPT='
 SID="$1"; TP="$2"; CWD="$3"; PY="$4"; ROOT="$5"; LOG="$6"
 SHUTDOWN="/tmp/prbe-cc-tap-watcher-${SID}.shutdown"
 RESTART_COUNT=0
 WINDOW_START=$(date +%s)
+CHILD_PID=""
+trap '\''[ -n "$CHILD_PID" ] && kill -TERM "$CHILD_PID" 2>/dev/null; exit 0'\'' TERM INT
 while true; do
     [ -f "$SHUTDOWN" ] && exit 0
     NOW=$(date +%s)
@@ -74,18 +82,27 @@ while true; do
         echo "[$(date -u +%FT%TZ)] tap: too many restarts in 1min, giving up" >>"$LOG"
         exit 1
     fi
-    "$PY" -m tap watch --session-id "$SID" --transcript "$TP" --cwd "$CWD" --plugin-root "$ROOT" >>"$LOG" 2>&1 || true
+    "$PY" -m tap watch --session-id "$SID" --transcript "$TP" --cwd "$CWD" --plugin-root "$ROOT" >>"$LOG" 2>&1 &
+    CHILD_PID=$!
+    wait "$CHILD_PID" 2>/dev/null || true
+    CHILD_PID=""
     [ -f "$SHUTDOWN" ] && exit 0
     RESTART_COUNT=$((RESTART_COUNT + 1))
     sleep 5
 done
 '
 
+# Detach the wrapper. nohup ignores SIGHUP so it survives CC's exit; `&`
+# backgrounds it; `disown` removes it from this shell's job table so the
+# parent (this hook) can exit cleanly without reaping it. On Linux this is
+# equivalent to setsid (just without the new process group); on macOS it's
+# the only portable option since setsid isn't installed by default.
 PYTHONPATH="$PLUGIN_ROOT" \
-    setsid /bin/bash -c "$WRAPPER_SCRIPT" wrapper \
+    nohup /bin/bash -c "$WRAPPER_SCRIPT" wrapper \
     "$SESSION_ID" "$TRANSCRIPT_PATH" "$CWD" "$PY" "$PLUGIN_ROOT" "$LOG_FILE" \
     </dev/null >>"$LOG_FILE" 2>&1 &
 WRAPPER_PID=$!
+disown
 echo "$WRAPPER_PID" >"$PID_FILE"
 
 printf '{"continue": true}\n'
