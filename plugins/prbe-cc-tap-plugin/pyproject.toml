@@ -1,6 +1,6 @@
 [project]
 name = "prbe-cc-tap-plugin"
-version = "0.2.2"
+version = "0.2.3"
 description = "Claude Code plugin: ships per-session transcripts to Probe for ingestion"
 requires-python = ">=3.11"
 dependencies = []

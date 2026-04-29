@@ -63,6 +63,22 @@ ORPHAN_LSOF_TIMEOUT_S = 5
 _shutdown_requested = False
 
 
+def _batch_seq_meta_key(session_id: str) -> str:
+    return f"last_batch_seq:{session_id}"
+
+
+def _read_int_meta(storage: Storage, key: str, *, default: int) -> int:
+    """Read a meta value as int, returning `default` for missing/malformed."""
+    raw = storage.get_meta(key)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning("meta[%s]=%r is not an int; treating as %d", key, raw, default)
+        return default
+
+
 def _install_signal_handlers() -> None:
     def _handler(_sig: int, _frame: object) -> None:
         global _shutdown_requested
@@ -171,8 +187,24 @@ def _run_loop(c: cfg.WatchConfig, storage: Storage) -> int:
     base_url = cfg.api_base_url()
     device_id = storage.get_meta("device_id")  # may be empty for legacy/test setups
 
-    # Resume batch_seq from any rows still queued for this session, else 0.
-    batch_seq = max(0, storage.max_batch_seq(c.session_id) + 1)
+    # Resume batch_seq across daemon restarts.
+    #
+    # source_event_id at the upstream gateway is "<session>:<batch_seq>", and
+    # the gateway uses ON CONFLICT DO NOTHING on (customer, source_system,
+    # source_event_id). If we reset batch_seq to 0 on every daemon start, a
+    # restart mid-session will re-issue source_event_ids the gateway already
+    # has — they get silently de-duped, returning 2xx but ingesting nothing.
+    #
+    # max_batch_seq(outbox) only knows about batches still queued locally;
+    # successful drains delete those rows, so it returns -1 after the daemon
+    # catches up and restarts. We keep a durable high-water mark in `meta`
+    # under "last_batch_seq:<session>" and bump it after every enqueue, so a
+    # restart picks up at last_seq+1 instead of 0.
+    seq_meta_key = _batch_seq_meta_key(c.session_id)
+    batch_seq = max(
+        storage.max_batch_seq(c.session_id),
+        _read_int_meta(storage, seq_meta_key, default=-1),
+    ) + 1
 
     missing_ticks = 0
     tick_count = 0
@@ -230,6 +262,9 @@ def _run_loop(c: cfg.WatchConfig, storage: Storage) -> int:
                             body=body,
                             now=now,
                         )
+                        # Persist the high-water mark BEFORE incrementing so a
+                        # crash here doesn't reset the counter on restart.
+                        storage.set_meta(seq_meta_key, str(batch_seq))
                         batch_seq += 1
                         commit_offset()
                         committed = True
