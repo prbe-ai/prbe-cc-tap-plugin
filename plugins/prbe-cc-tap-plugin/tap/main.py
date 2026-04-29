@@ -115,11 +115,13 @@ def main(argv: list[str] | None = None) -> int:
 
     log_dir = cfg.log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
+    # FileHandler only — the wrapper bash already redirects this python
+    # process's stdout+stderr into the same log file via `>>"$LOG" 2>&1`.
+    # Adding a StreamHandler too would double every line in the log.
     logging.basicConfig(
         level="INFO",
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        handlers=[logging.FileHandler(log_dir / f"{args.session_id}.log"),
-                  logging.StreamHandler()],
+        handlers=[logging.FileHandler(log_dir / f"{args.session_id}.log")],
     )
     _install_signal_handlers()
 
@@ -211,21 +213,29 @@ def _run_loop(c: cfg.WatchConfig, storage: Storage) -> int:
                     base_line_no=line_no_base,
                     lines=new_lines,
                 )
-                try:
-                    outbox.enqueue(
-                        storage=storage,
-                        session_id=c.session_id,
-                        batch_seq=batch_seq,
-                        cwd=str(c.cwd),
-                        body=body,
-                        now=now,
-                    )
-                    batch_seq += 1
+                if body is None:
+                    # Sanitizer dropped every event in this tick (e.g. a tick
+                    # that only saw stop_hook_summary + turn_duration). No
+                    # webhook to ship, but the lines were "processed" — commit
+                    # the offset so we don't re-read them next tick.
                     commit_offset()
                     committed = True
-                except Exception:
-                    # Offset was NOT advanced; same lines are re-read next tick.
-                    log.exception("enqueue failed; lines will be re-read next tick")
+                else:
+                    try:
+                        outbox.enqueue(
+                            storage=storage,
+                            session_id=c.session_id,
+                            batch_seq=batch_seq,
+                            cwd=str(c.cwd),
+                            body=body,
+                            now=now,
+                        )
+                        batch_seq += 1
+                        commit_offset()
+                        committed = True
+                    except Exception:
+                        # Offset NOT advanced; same lines are re-read next tick.
+                        log.exception("enqueue failed; lines will be re-read next tick")
             if not committed and not new_lines:
                 # No lines this tick — still refresh last_seen_at + inode/size.
                 commit_offset()

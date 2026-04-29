@@ -1,8 +1,9 @@
 """Build batch payloads, enqueue them, and drain the outbox.
 
-Mirrors prbe-agent-tap's buildBatchBody + drainer.tick. `raw` events embed
-the parsed-JSON line as a JSON value (not a stringified one), so the
-backend sees the same structure Claude Code wrote.
+Each event's `raw` is the parsed JSON value (CC's transcript line) with
+sanitization applied to strip API metadata that has no content value —
+see tap.sanitize for what gets dropped. Bookkeeping-only system events
+(e.g. stop_hook_summary, turn_duration) are dropped entirely.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import time
 
 from tap import config as cfg
 from tap import httpclient
+from tap.sanitize import sanitize_event
 from tap.storage import Storage
 
 log = logging.getLogger("prbe-cc-tap.outbox")
@@ -30,12 +32,18 @@ def build_batch_body(
     cwd: str,
     base_line_no: int,
     lines: list[bytes],
-) -> bytes:
+) -> bytes | None:
     """Construct the JSON body for /webhooks/claude_code.
 
-    `raw` per-line is the parsed JSON value (we know lines validated). If a
-    line somehow fails to parse we embed the raw string instead, matching
-    Go's lenient json.RawMessage when faced with non-JSON.
+    Each line is parsed JSON, then run through `sanitize_event` to strip
+    Anthropic API metadata (usage, iterations, cache_creation, thinking
+    signatures, …) and drop CC-internal bookkeeping events
+    (`stop_hook_summary`, `turn_duration`). Lines whose JSON fails to parse
+    are kept as raw strings — same lenient fallback as before.
+
+    Returns None if every event was dropped by the sanitizer (e.g. a tick
+    that only saw stop_hook_summary + turn_duration). Caller should treat
+    None as "nothing to ship, but advance the offset."
     """
     events = []
     for i, line in enumerate(lines):
@@ -43,7 +51,12 @@ def build_batch_body(
             raw = json.loads(line)
         except (ValueError, UnicodeDecodeError):
             raw = line.decode("utf-8", errors="replace")
-        events.append({"line_no": base_line_no + i, "raw": raw})
+        sanitized = sanitize_event(raw)
+        if sanitized is None:
+            continue
+        events.append({"line_no": base_line_no + i, "raw": sanitized})
+    if not events:
+        return None
     body = {
         "device_id": device_id,
         "session_id": session_id,
