@@ -10,13 +10,20 @@ Today it has one plugin: [`prbe-cc-tap-plugin`](./plugins/prbe-cc-tap-plugin/).
 /plugin install prbe-cc-tap-plugin@prbe-ai
 ```
 
-Then pair the device with your Probe workspace from a terminal. The `*/`
-glob resolves to whichever version Claude Code installed:
+Then pair the device with your Probe workspace from a terminal. Pick the
+highest-version dir under the cache — Claude Code keeps older versions
+side-by-side, so a bare `*/` glob errors with `cd: too many arguments`
+as soon as you've upgraded once:
 
 ```bash
-cd ~/.claude/plugins/cache/prbe-ai/prbe-cc-tap-plugin/*/ && \
+cd "$(ls -1d ~/.claude/plugins/cache/prbe-ai/prbe-cc-tap-plugin/*/ | sort -V | tail -1)" && \
   python3 -m tap pair <pairing-token>
 ```
+
+(`sort -V` is portable on macOS and Linux and orders `0.2.10` after
+`0.2.9` correctly. `pair` writes its state to the stable
+`~/.claude/plugins/prbe-cc-tap-plugin/` dir, so any installed version
+is fine — newest is just the safe default.)
 
 Get a pairing token from your Probe dashboard:
 **https://dashboard.prbe.ai → Integrations → Claude Code**.
