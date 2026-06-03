@@ -18,11 +18,12 @@ Claude Code:
 /plugin install prbe-cc-tap-plugin@prbe-ai
 ```
 
-Then pair this laptop with your Probe workspace from a terminal. The `*/`
-glob resolves to whichever version Claude Code installed:
+Then pair this laptop with your Probe workspace from a terminal. `sort -V`
+picks the newest installed version (a bare `*/` glob sorts lexically, so it
+would pick `0.2.9` over `0.2.10`):
 
 ```bash
-cd ~/.claude/plugins/cache/prbe-ai/prbe-cc-tap-plugin/*/ && \
+cd "$(ls -d ~/.claude/plugins/cache/prbe-ai/prbe-cc-tap-plugin/*/ | sort -V | tail -1)" && \
   python3 -m tap pair <pairing-token>
 ```
 

@@ -24,6 +24,42 @@ fi
 
 LOG_FILE="${LOG_DIR}/${SESSION_ID}.log"
 
+# --- Version self-heal (runs on the first session after an install/update) ---
+# CC's marketplace owns install and the versioned cache/ path, but the state
+# dir (PLUGIN_DIR) persists across versions and can carry stale artifacts into
+# a new one. We never touch live state (.token, .config, state.db, logs), and
+# never prune CC's cache (an older version may still back a concurrent session
+# — that's why the README pair command selects the newest with `sort -V`).
+RUNNING_VER=""
+if [ -f "$PLUGIN_ROOT/.claude-plugin/plugin.json" ]; then
+    RUNNING_VER=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version",""))' \
+        "$PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null || echo "")
+fi
+
+# One-time cleanup of the pre-marketplace curl-installer, which cloned plugin
+# *code* straight into the state dir. `.orphaned_at` is written by Claude Code
+# when it supersedes an in-place plugin dir, so its presence proves this is the
+# legacy leftover and NOT a developer checkout pointed at via
+# PRBE_CC_TAP_PLUGIN_DIR (which carries no such marker). PLUGIN_DIR != PLUGIN_ROOT
+# means CC runs our code from the cache, so the code files here are dead weight.
+if [ -f "$PLUGIN_DIR/.orphaned_at" ] && [ "$PLUGIN_DIR" != "$PLUGIN_ROOT" ]; then
+    echo "[$(date -u +%FT%TZ)] removing pre-marketplace install leftovers from $PLUGIN_DIR" >>"$LOG_FILE"
+    for _stale in .git .gitattributes .gitignore .claude-plugin tap hooks tests \
+                  scripts README.md pyproject.toml uv.lock .orphaned_at; do
+        rm -rf "${PLUGIN_DIR:?}/${_stale}" 2>/dev/null || true
+    done
+fi
+
+# Stamp the running version; log the transition the first time it changes so an
+# update is visible in the session log (and gives a hook for future migrations).
+if [ -n "$RUNNING_VER" ]; then
+    PREV_VER=$(cat "$PLUGIN_DIR/.installed_version" 2>/dev/null || echo "")
+    if [ "$RUNNING_VER" != "$PREV_VER" ]; then
+        echo "[$(date -u +%FT%TZ)] prbe-cc-tap version ${PREV_VER:-none} -> $RUNNING_VER" >>"$LOG_FILE"
+        printf '%s' "$RUNNING_VER" >"$PLUGIN_DIR/.installed_version" 2>/dev/null || true
+    fi
+fi
+
 # Killswitch: presence of .disabled disables the daemon entirely.
 if [ -f "$PLUGIN_DIR/.disabled" ]; then
     echo "[$(date -u +%FT%TZ)] killswitch active, skipping" >>"$LOG_FILE"

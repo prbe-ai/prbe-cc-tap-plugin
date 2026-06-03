@@ -1,5 +1,5 @@
 {
   "name": "prbe-cc-tap-plugin",
   "description": "Claude Code plugin: ships per-session transcripts to Probe for ingestion",
-  "version": "0.2.5"
+  "version": "0.2.6"
 }
