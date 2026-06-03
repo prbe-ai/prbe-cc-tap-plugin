@@ -38,6 +38,15 @@ def run() -> int:
             print(f"prbe-cc-tap: halted (token revoked at {_relative(last_401)})")
             print("  Run `python -m tap pair <token>` with a fresh token to resume.")
             return 1
+        try:
+            cfg.api_base_url()
+        except cfg.APIBaseURLUnset:
+            # Paired in the DB but no backend host on record — e.g. an install
+            # paired before host-pinning was added. The daemon won't start, so
+            # don't report "paired" and imply it's shipping.
+            print("prbe-cc-tap: paired, but no backend host on record")
+            print("  Run `python -m tap pair <token>` with a fresh token to set the host and resume ingestion.")
+            return 1
         print("prbe-cc-tap: paired")
         print(f"  device:        {device_id}")
         print(f"  customer:      {storage.get_meta('customer_id')}")

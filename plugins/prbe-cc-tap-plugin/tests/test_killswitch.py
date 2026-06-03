@@ -14,6 +14,8 @@ import pytest
 def _isolated_plugin_dir(monkeypatch):
     tmp = tempfile.mkdtemp(prefix="prbe-cc-tap-killswitch-test-")
     monkeypatch.setenv("PRBE_CC_TAP_PLUGIN_DIR", tmp)
+    # _run_loop requires a configured backend host (no hardcoded fallback).
+    monkeypatch.setenv("PRBE_API_BASE_URL", "https://api.invalid")
     yield Path(tmp)
 
 

@@ -67,13 +67,21 @@ def run(pairing_token: str) -> int:
     # back; capturing now keeps the two cleanly separated.
     old_bearer = cfg.load_token()
 
+    # The backend host comes from the pairing token's `iss` claim (env can
+    # still override). No hardcoded fallback — see cfg.base_url_from_pairing_token.
+    try:
+        base = cfg.pair_base_url(pairing_token)
+    except ValueError as exc:
+        print(f"pair failed: {exc}", file=sys.stderr)
+        return 1
+
     body = json.dumps({
         "pairing_token": pairing_token,
         "os": _os_label(),
         "hostname": socket.gethostname(),
     }).encode("utf-8")
 
-    url = cfg.api_base_url() + cfg.PAIR_PATH
+    url = base + cfg.PAIR_PATH
     resp = httpclient.post_json(url, body)
 
     if resp.classification == httpclient.Classification.HALT:
@@ -94,6 +102,10 @@ def run(pairing_token: str) -> int:
     if not device_id or not device_token:
         print("pair response missing device_id or device_token", file=sys.stderr)
         return 1
+
+    # Pin the host this pairing used so the daemon (and the old-pairing revoke
+    # below) reach the same backend without re-deriving or guessing.
+    cfg.persist_api_base_url(base)
 
     cfg.write_token(device_token)
 

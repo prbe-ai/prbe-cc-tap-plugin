@@ -24,6 +24,10 @@ def _isolated_plugin_dir(monkeypatch):
     user's real plugin state."""
     tmp = tempfile.mkdtemp(prefix="prbe-cc-tap-test-")
     monkeypatch.setenv("PRBE_CC_TAP_PLUGIN_DIR", tmp)
+    # _run_loop now requires a configured backend host (no hardcoded fallback);
+    # a paired daemon always has one. `.invalid` never resolves, so the
+    # killswitch poll fails fast and fails open — exactly as in production.
+    monkeypatch.setenv("PRBE_API_BASE_URL", "https://api.invalid")
     # tap.config caches paths only inside helpers — no module-level cache to clear.
     yield Path(tmp)
 

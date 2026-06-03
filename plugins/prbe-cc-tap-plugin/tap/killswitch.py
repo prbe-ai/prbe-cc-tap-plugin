@@ -1,6 +1,6 @@
 """Client-side killswitch check.
 
-Polls api.prbe.ai/agent-tap/ingestion-status before each tick. When the
+Polls the backend's /agent-tap/ingestion-status before each tick. When the
 server says ingestion is paused, the daemon skips the entire tick: no
 tail, no enqueue, no drain. byte_offset stays put so the next enabled
 tick catches up automatically.
@@ -8,7 +8,7 @@ tick catches up automatically.
 Caches the response for KILLSWITCH_TTL_S to keep poll volume bounded.
 On fetch error: returns the last-known value if fresh, else fails OPEN
 (continues ingesting). The killswitch is for graceful pause, not
-fail-secure — losing reachability to api.prbe.ai already breaks ingestion,
+fail-secure — losing reachability to the backend already breaks ingestion,
 so failing closed would just amplify a network hiccup into a full halt.
 
 The defense-in-depth path is server-side: prbe-knowledge's webhook handler

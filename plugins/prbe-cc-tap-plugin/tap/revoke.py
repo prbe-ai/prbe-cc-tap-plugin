@@ -30,10 +30,16 @@ def run() -> int:
 
     server_err = ""
     if token:
-        url = cfg.api_base_url() + cfg.REVOKE_PATH
-        resp = httpclient.post_json(url, json.dumps({}).encode("utf-8"), bearer=token)
-        if resp.classification != httpclient.Classification.SUCCESS:
-            server_err = resp.error or f"status {resp.status}"
+        try:
+            url = cfg.api_base_url() + cfg.REVOKE_PATH
+        except cfg.APIBaseURLUnset as exc:
+            # No host on record (e.g. legacy pairing pre-dating host pinning).
+            # Can't reach the server, but uninstall must still wipe locally.
+            server_err = str(exc)
+        else:
+            resp = httpclient.post_json(url, json.dumps({}).encode("utf-8"), bearer=token)
+            if resp.classification != httpclient.Classification.SUCCESS:
+                server_err = resp.error or f"status {resp.status}"
 
     # Always wipe local state.
     with contextlib.suppress(FileNotFoundError):

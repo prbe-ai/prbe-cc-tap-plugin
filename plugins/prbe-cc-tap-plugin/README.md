@@ -1,9 +1,10 @@
 # prbe-cc-tap-plugin
 
 A Claude Code plugin that ships per-session Claude Code transcripts to
-Probe (`api.prbe.ai/webhooks/claude_code`) for ingestion. Runs as a
-session-scoped daemon spawned by CC's `SessionStart` hook and torn down
-on `SessionEnd`.
+Probe's `/webhooks/claude_code` endpoint for ingestion. The backend host is
+read from the pairing token, so the plugin always targets whichever backend
+minted the token — there is no hardcoded host. Runs as a session-scoped
+daemon spawned by CC's `SessionStart` hook and torn down on `SessionEnd`.
 
 Zero runtime dependencies (stdlib only); Python 3.11+.
 
@@ -25,7 +26,7 @@ cd ~/.claude/plugins/cache/prbe-ai/prbe-cc-tap-plugin/*/ && \
   python3 -m tap pair <pairing-token>
 ```
 
-Get a pairing token from **https://dashboard.prbe.ai → Integrations → Claude Code**.
+Get a pairing token from **https://knowledge.prbe.ai → Integrations → Claude Code**.
 
 ## How it works
 
@@ -114,7 +115,7 @@ touch ~/.claude/plugins/prbe-cc-tap-plugin/.disabled
 
 | Variable | Purpose |
 |----------|---------|
-| `PRBE_API_BASE_URL` | Override base URL (default `https://api.prbe.ai`). |
+| `PRBE_API_BASE_URL` | Override the backend host. Default: derived from the pairing token's `iss` claim at pair time and persisted — no hardcoded fallback. |
 | `PRBE_CC_TAP_ACTIVE_INTERVAL_SECONDS` | Override active interval. |
 | `PRBE_CC_TAP_IDLE_INTERVAL_SECONDS` | Override idle interval. |
 | `PRBE_CC_TAP_INTERVAL_SECONDS` | Legacy single-knob — applies to both. |

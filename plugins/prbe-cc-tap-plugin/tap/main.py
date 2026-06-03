@@ -26,6 +26,7 @@ Exits cleanly on:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import signal
 import subprocess
@@ -152,6 +153,19 @@ def main(argv: list[str] | None = None) -> int:
     token = cfg.load_token()
     if not token:
         log.info("no token at %s; run `python -m tap pair <token>` first", cfg.token_file())
+        return 0
+
+    # Resolve the backend host once up front. No hardcoded fallback: if it's
+    # unset, there's nothing to ship to, so stop cleanly instead of crash-
+    # looping against a host that doesn't exist. The wrapper respawns on any
+    # exit code, so we touch the shutdown sentinel (same mechanism the orphan-
+    # exit path uses) to actually stop it for this session.
+    try:
+        cfg.api_base_url()
+    except cfg.APIBaseURLUnset as exc:
+        log.error("%s; not starting daemon", exc)
+        with contextlib.suppress(OSError):
+            cfg.shutdown_sentinel(args.session_id).touch()
         return 0
 
     active_s, idle_s = cfg.intervals()
